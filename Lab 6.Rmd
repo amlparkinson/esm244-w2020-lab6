@@ -1,0 +1,331 @@
+---
+title: "Lab 6"
+author: "Anne-Marie Parkinson"
+date: "February 13, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = F, 
+                      warning = F)
+```
+
+```{r}
+# load packages-------------------------------------------------------------------
+
+library(tidyverse)
+library(here)
+library(janitor)
+library(raster)
+library(tmap)
+library(tmaptools)
+library(gstat)
+library(sf)
+
+```
+
+## Grand Canyon GeoTIFF
+
+```{r}
+
+#load data
+gc_dem <- raster (here("data", "gc_dem.tif"))
+
+#plot raster 
+plot(gc_dem)
+
+#check coord system
+crs(gc_dem) # UTM 12, so measurements in meters instead of degrees
+
+# check the extent (ie max and min boundaries of the layer)
+extent(gc_dem)
+
+#create a wgs84 with latitude and longitude metrics (meters --> degrees; to do this copy and paste the crs output (from above), remove ellps adn twgs from the copied crs output, change proj=utm to proj=long/lat, and put the output in " "). One way to do this. there are other ways. 
+
+wgs84 <- "+proj=longlat +zone=12 +datum=WGS84 +units=m +no_defs"
+
+# reproject the layer (ie change coord system)
+gc_reproject <- projectRaster(gc_dem, crs = wgs84, method = "bilinear")
+
+# check that the reproject changed 
+extent(gc_reproject) # no units are in degrees
+
+```
+
+
+# Crop raster to smaller area (bounding box)
+
+```{r}
+
+bounds <- as(extent(-112.4, -112.0, 36.1, 36.3), "SpatialPolygons")
+# choose coordinates within the extent ( which is determined by extent(layer_name)). not sure what spatialpolygons is but need it
+
+```
+
+
+# make the crs of our bounding box the same as for the gc_reproj
+
+```{r}
+crs(bounds) <- crs(gc_reproject)
+
+```
+
+
+
+# before created a bounding box, now lets actually crop our original data
+```{r}
+#crop
+gc_crop <- crop(gc_reproject, bounds)
+
+#visualize new layer
+plot(gc_crop)
+
+```
+
+# resample layer using agregate function
+
+if using another layer with diff resolution, setting the layers to the same reesolution will allow you to do raster math
+
+```{r}
+# resample: specify that using aggregation funciton from the raster package, specify the layer going to resample, fact = new cell/pixel size, and default= to use the mean value of the cells used to create the new, larger cell
+gc_agg <- raster::aggregate(gc_crop, fact = 30)
+
+#visualize new layer
+plot(gc_agg)
+  
+```
+
+
+# ggplot
+
+
+
+```{r}
+# first, convert data into a data frame
+gc_df <- as.data.frame(gc_crop, xy= T)
+
+# xy parameter tells r in inlcude the lat and long data of the cells in the data frame
+
+# ggplot
+ggplot(data = gc_df, aes(x = x, y = y)) +
+  geom_raster(aes(fill = gc_dem)) +
+  coord_quickmap() +
+  theme_minimal() +
+  scale_fill_gradientn(colors = c("purple",  "magenta", "orange",'yellow', 'white')) # gradientn = can choose as many colors as you want and they will appear as they are listed
+
+```
+
+# how to select cells that match a given criteria
+
+
+```{r}
+# copy gc_crop
+gc_hab <- gc_crop
+
+# set any cells outside of 1000-1500 to NA
+gc_hab[gc_hab > 1500 | gc_hab < 1000] <- NA # this says: from this layer, look for cell values greater than 1500 and less than 1000 and assign those cells to a new value which is NA
+
+#plot to visualize the new layer
+plot(gc_hab)
+
+```
+
+# now lets make this interactive with tmap
+
+```{r}
+#set tmap to view
+tmap_mode("view")
+
+#plot
+
+# PC users get an error runngin this code: tm_shape(gc_hab) + tm_raster(legend.show = F, palette = "plasma")
+
+
+
+```
+
+
+## Kriging: prediciting rain in Kansas
+
+```{r}
+#load data
+ks_counties <- read_sf(here("data", "ks_counties", 'ks_counties_shapefile.shp'))
+
+# use baseplot to visualize data
+plot(ks_counties)
+
+#check crs
+crs(ks_counties) # no crs
+
+# set crs for ks_counties
+st_crs(ks_counties) <- 4326
+
+#check crs again to make sure it worked
+crs(ks_counties)
+
+# plot again. assigned a coord system so the state now looks like it should (before it was a little stretched out)
+plot(ks_counties)
+
+# ggplot
+
+ggplot(data = ks_counties) +
+  geom_sf()
+
+```
+
+# read in rainfall data
+
+```{r}
+#load data. it has lat and long data/columns, but r does not recognize the csv data as spatial data
+ks_rain <- read_csv(here("data", "ks_rain.csv")) %>% 
+  clean_names
+
+# have r recognize ks_rain as spatial data
+ks_sf <- st_as_sf(ks_rain, coords = c("lon", "lat"), crs = 4326) # parameters = name of data, which columns (the column names) have the longitude and latitude data. HAVE TO ASSIGN LONGITUDE AND LATITUDE DATA IN THAT ORDER, then set the coord system
+  
+  
+```
+
+
+# plot
+
+```{r}
+ggplot() +
+  geom_sf(data = ks_counties) +
+  geom_sf(data = ks_sf,
+          aes(color = amt, size = amt), 
+          show.legend = F) +
+  theme_minimal()
+```
+
+
+## kriging to predict rainfall across the entire state
+
+```{r}
+# not sure the purpose of this code
+ks_sp <- as_Spatial(ks_sf)
+class(ks_sp)
+  
+```
+
+# make a spatial pixels grid that we'll make predictions over
+
+use bbox(ks_sp) (in the console) to get the min and max coordinates of the data frame
+
+```{r}
+lat <- seq(37, 40, length.out = 200) # so this creates a grid from lat from 37 and 40 with points that are 200 points equidistant from the predceeding grid point. 
+long <- seq(-94.6, -102, length.out = 200)
+
+# now expand this into a spatial grid
+grid <- expand.grid(lon = long, lat = lat)
+
+# now have r recognize the grid as spatial data. make sure it has the same coord system as the real data
+grid_sf <- st_as_sf(grid, coords = c("lon", "lat"), crs = 4326)
+
+grid_sp <-  as_Spatial(grid_sf)
+
+#plot grid
+plot(grid_sf)
+
+
+```
+
+## make variogram: want to know how closely related rainfall amounts are based on distance btw points
+
+```{r}
+
+# variogram
+ks_vgm <- gstat::variogram(amt ~ 1, data = ks_sp)
+
+#plot variogram output
+plot(ks_vgm)
+
+# estimates for variogram parameters:
+## nugget = 0.1
+# sill = 0.8
+#range = 200
+
+# fit variogram model
+ks_vgm_fit <- fit.variogram(ks_vgm, model = vgm(nugget = 0.2, psill = 0.8, range = 200, model = "Sph")) # --> input best guesses forr nugget, psill and range; other model types = Sph (Sphere?), Exp (exponential), Gau (gausian). 
+
+# see model fit outputs. Can see how your guesses of nugget, psill, and range match up to the model estiamtes
+ks_vgm_fit
+
+#plot model and fitted model to get line of best fit
+plot(ks_vgm, ks_vgm_fit)
+
+```
+
+plot shows...how much rainfall differes between points based on distance btw the points
+
+
+# now, Krige!
+```{r}
+
+ks_krige <- krige(amt ~ 1, ks_sp, grid_sp, model = ks_vgm_fit)
+
+```
+
+to view the krige output--> in console view(ks_krige@data)
+
+
+# plot krige predictions
+
+```{r}
+spplot(ks_krige, "var1.pred")
+```
+
+
+# make data frame of krige predictions
+
+```{r}
+
+#data frame
+ks_df <- data.frame(ks_krige@data["var1.pred"],
+                    ks_krige@data["var1.var"],
+                    ks_krige@coords) %>% 
+  rename(longitude = coords.x1,
+         latitude = coords.x2)
+
+# convert df to spatial data
+rain_sf <- st_as_sf(ks_df, coords = c("longitude", "latitude"), crs = 4326)
+
+# plot predictions. predictions are based on a grid and not the outline of kansas, so next step is to crop the predicitons to the state of kansas
+ggplot (rain_sf)+
+  geom_sf(aes(color = var1.pred))
+
+
+```
+
+# crop predcitions to boundary of kansas
+
+```{r}
+# load data 
+ks <- read_sf(dsn = here("data", "states"), layer = "cb_2017_us_state_20m") %>% 
+  dplyr::select(NAME) %>% 
+  filter (NAME == "Kansas") %>% 
+  st_transform(crs = 4326) # use st_transform instead of st_crs bc theres already a coord system associated with this data. 
+
+# crop
+rain_sf_ks <- st_intersection (rain_sf, ks)
+
+# plot
+ggplot(rain_sf_ks) +
+  geom_sf(aes(color = var1.pred))
+
+# plot
+ggplot(rain_sf_ks) +
+  geom_sf(aes(color = var1.var))
+#low uncertainty with points that have many close by points and high uncertainty with points that have few nearby points
+
+```
+
+
+
+
+
+
+
+
+
